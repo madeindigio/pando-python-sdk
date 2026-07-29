@@ -154,6 +154,85 @@ async def main():
 asyncio.run(main())
 ```
 
+### AG-UI / GenUI client (`pando.agui`)
+
+[AG-UI](https://docs.ag-ui.com) is the protocol CopilotKit and other Generative-UI
+frontends speak to agent backends. Pando serves it from `pando agui-serve --port 8090`
+(or `pando serve --agui-port 8090`); it is **off by default** and requires a bearer
+token and an origin allow-list, because it exposes a code-executing agent to a browser.
+
+`pando.agui` is a separate subpackage: importing `pando` pulls in none of it. The
+synchronous API uses only the standard library; the async one needs
+`pip install pando-sdk[agui]`.
+
+```python
+import os
+
+from pando.agui import PandoAguiClient, PandoState
+
+client = PandoAguiClient(
+    base_url="http://localhost:8090",
+    token=os.environ["PANDO_TOKEN"],
+    agent="coder",
+)
+
+# Discovery: which agents exist, their model, which capabilities are on
+info = client.info_sync()
+
+for event in client.run_sync(prompt="Summarise the repo"):
+    if event.type == "TEXT_MESSAGE_CONTENT":
+        print(event.delta, end="", flush=True)
+    elif event.type == "STATE_SNAPSHOT":
+        state = PandoState.from_wire(event.snapshot)
+        print(state.todos, state.sub_agents)
+    elif event.type == "RUN_FINISHED" and event.get("outcome") == "interrupt":
+        # The agent called one of your `tools`: run it, then call run_sync again
+        # on the same thread with a `tool` message carrying the result.
+        ...
+```
+
+Async, with `httpx` installed:
+
+```python
+async for event in client.run(prompt="Summarise the repo"):
+    ...
+
+text = await client.run_text("What does cmd/root.go do?")
+```
+
+Frontend tools and human-in-the-loop:
+
+```python
+from pando.agui import AguiMessage, AguiTool, PandoPermissionRequest, PERMISSION_TOOL_NAME
+
+tools = [AguiTool(name="show_chart", description="Renders a chart",
+                  parameters={"type": "object"})]
+history = [AguiMessage(id="m1", role="user", content="chart the commits")]
+
+call_id = None
+for event in client.run_sync(messages=history, tools=tools, thread_id="thread-1"):
+    if event.type == "TOOL_CALL_START":
+        call_id = event.tool_call_id          # PERMISSION_TOOL_NAME for approvals
+    elif event.type == "TOOL_CALL_ARGS" and event.tool_call_id == call_id:
+        arguments = event.delta               # accumulate, then parse
+
+# Answer it and resume the suspended run on the same thread.
+history.append(AguiMessage(id="m2", role="tool", tool_call_id=call_id, content="rendered"))
+for event in client.run_sync(messages=history, tools=tools, thread_id="thread-1"):
+    ...
+```
+
+| Export | Purpose |
+|---|---|
+| `PandoAguiClient` | Run/discovery client (`run`, `run_text`, `info` + `*_sync` variants) |
+| `AguiEvent` | One protocol event; fields readable as `event.delta` or `event.get("delta")` |
+| `PandoState` | The shared-state document (`STATE_SNAPSHOT`) |
+| `JsonPatchOperation` | One `STATE_DELTA` operation |
+| `AguiMessage` / `AguiTool` / `AguiContext` | Request payload types |
+| `AguiInfo` | The `/info` discovery document |
+| `parse_sse` | The event-stream parser, if you issue the request yourself |
+| `PERMISSION_TOOL_NAME`, `PandoPermissionRequest` | Human-in-the-loop approvals |
+
 ## Reference
 
 ### PandoClient (simple subprocess mode)
